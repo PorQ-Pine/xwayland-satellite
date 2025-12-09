@@ -69,3 +69,10 @@ inherits = "dev"
 # Shrink bloat in ./target which negatively affects build caching
 incremental = false
 debug = false
+
+[profile.release]
+debug = false
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = true
