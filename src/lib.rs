@@ -4,12 +4,12 @@ pub mod xstate;
 use crate::server::{NoConnection, PendingSurfaceState, ServerState};
 use crate::xstate::{RealConnection, XState};
 use log::{error, info};
-use rustix::event::{poll, PollFd, PollFlags, Timespec};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use server::selection::{Clipboard, Primary};
 use smithay_client_toolkit::data_device_manager::WritePipe;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::net::UnixStream;
+use std::os::unix::{net::UnixStream, process::ExitStatusExt};
 use std::process::{Command, ExitStatus, Stdio};
 use wayland_server::{Display, ListeningSocket};
 use xcb::x;
@@ -36,6 +36,9 @@ type RealServerState = ServerState<RealConnection>;
 pub trait RunData {
     fn display(&self) -> Option<&str>;
     fn listenfds(&mut self) -> Vec<OwnedFd>;
+    fn flags(&self) -> &[String] {
+        &[]
+    }
     fn server(&self) -> Option<UnixStream> {
         None
     }
@@ -58,12 +61,16 @@ pub const fn timespec_from_millis(millis: u64) -> Timespec {
     }
 }
 
-pub fn main(mut data: impl RunData) -> Option<()> {
+pub fn version() -> &'static str {
     let mut version = env!("VERGEN_GIT_DESCRIBE");
     if version == "VERGEN_IDEMPOTENT_OUTPUT" {
         version = env!("CARGO_PKG_VERSION");
     }
-    info!("Starting xwayland-satellite version {version}");
+    version
+}
+
+pub fn main(mut data: impl RunData) -> Option<()> {
+    info!("Starting xwayland-satellite version {}", version());
 
     let socket = ListeningSocket::bind_auto("xwls", 1..=128).unwrap();
     let mut display = Display::new().unwrap();
@@ -95,6 +102,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             "-displayfd",
             &ready_tx.as_raw_fd().to_string(),
         ])
+        .args(data.flags())
         .env("WAYLAND_DISPLAY", socket.socket_name().unwrap())
         .stderr(Stdio::piped())
         .spawn()
@@ -113,9 +121,9 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             let line = line.unwrap();
             info!(target: "xwayland_process", "{line}");
         }
-        let status = Box::new(xwayland.wait().unwrap());
-        let status = Box::into_raw(status) as usize;
-        finish_tx.write_all(&status.to_ne_bytes()).unwrap();
+        let status = xwayland.wait().unwrap().into_raw();
+        // On a successful integration test, the rx will be dropped, so keep logs/GDB clean
+        let _ = finish_tx.write_all(&status.to_ne_bytes());
     });
 
     let mut ready_fds = [
@@ -123,11 +131,10 @@ pub fn main(mut data: impl RunData) -> Option<()> {
         PollFd::new(&finish_rx, PollFlags::IN),
     ];
 
-    fn xwayland_exit_code(rx: &mut UnixStream) -> Box<ExitStatus> {
-        let mut data = [0; (usize::BITS / 8) as usize];
+    fn xwayland_exit_code(rx: &mut UnixStream) -> ExitStatus {
+        let mut data = [0; std::mem::size_of::<i32>()];
         rx.read_exact(&mut data).unwrap();
-        let data = usize::from_ne_bytes(data);
-        unsafe { Box::from_raw(data as *mut _) }
+        ExitStatus::from_raw(i32::from_ne_bytes(data))
     }
 
     let connection = match poll(&mut ready_fds, None) {
@@ -171,7 +178,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     let status = xwayland_exit_code(&mut quit_rx);
-                    if *status != ExitStatus::default() {
+                    if status != ExitStatus::default() {
                         error!("Xwayland exited early with {status}");
                     }
                     return None;
@@ -238,7 +245,7 @@ pub fn main(mut data: impl RunData) -> Option<()> {
             Ok(_) => {
                 if !fds[3].revents().is_empty() {
                     let status = xwayland_exit_code(&mut quit_rx);
-                    if *status != ExitStatus::default() {
+                    if status != ExitStatus::default() {
                         error!("Xwayland exited early with {status}");
                     }
                     return None;
