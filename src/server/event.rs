@@ -1592,8 +1592,18 @@ impl Event for zwp_tablet_pad_v2::Event {
     }
 }
 
+struct TabletToolInProximity;
+
 impl Event for zwp_tablet_tool_v2::Event {
     fn handle<C: XConnection>(self, target: Entity, state: &mut ServerState<C>) {
+        fn in_proximity<C: XConnection>(target: Entity, state: &ServerState<C>) -> bool {
+            state
+                .world
+                .entity(target)
+                .unwrap()
+                .has::<TabletToolInProximity>()
+        }
+
         match self {
             Self::ProximityIn {
                 serial,
@@ -1614,7 +1624,7 @@ impl Event for zwp_tablet_tool_v2::Event {
                         return;
                     };
                     let (surface, scale, window) = query.get().unwrap();
-                    cmd.insert(target, (*scale,));
+                    cmd.insert(target, (*scale, TabletToolInProximity));
 
                     let Some(s_tablet) =
                         tablet
@@ -1636,13 +1646,143 @@ impl Event for zwp_tablet_tool_v2::Event {
                 }
                 cmd.run_on(&mut state.world);
             }
+            Self::ProximityOut => {
+                if state
+                    .world
+                    .remove_one::<TabletToolInProximity>(target)
+                    .is_ok()
+                {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .proximity_out();
+                } else {
+                    warn!("dropping tablet tool proximity_out without proximity_in");
+                }
+            }
             Self::Motion { x, y } => {
+                if !in_proximity(target, state) {
+                    warn!("dropping tablet tool motion without proximity_in");
+                    return;
+                }
+
                 let (tool, scale) = state
                     .world
                     .query_one_mut::<(&TabletToolServer, Option<&SurfaceScaleFactor>)>(target)
                     .unwrap();
                 let scale = scale.map(|s| s.0).unwrap_or(1.0);
                 tool.motion(x * scale, y * scale);
+            }
+            Self::Down { serial } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .down(serial);
+                } else {
+                    warn!("dropping tablet tool down without proximity_in");
+                }
+            }
+            Self::Up => {
+                if in_proximity(target, state) {
+                    state.world.get::<&TabletToolServer>(target).unwrap().up();
+                } else {
+                    warn!("dropping tablet tool up without proximity_in");
+                }
+            }
+            Self::Distance { distance } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .distance(distance);
+                } else {
+                    warn!("dropping tablet tool distance without proximity_in");
+                }
+            }
+            Self::Pressure { pressure } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .pressure(pressure);
+                } else {
+                    warn!("dropping tablet tool pressure without proximity_in");
+                }
+            }
+            Self::Tilt { tilt_x, tilt_y } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .tilt(tilt_x, tilt_y);
+                } else {
+                    warn!("dropping tablet tool tilt without proximity_in");
+                }
+            }
+            Self::Rotation { degrees } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .rotation(degrees);
+                } else {
+                    warn!("dropping tablet tool rotation without proximity_in");
+                }
+            }
+            Self::Slider { position } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .slider(position);
+                } else {
+                    warn!("dropping tablet tool slider without proximity_in");
+                }
+            }
+            Self::Wheel { degrees, clicks } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .wheel(degrees, clicks);
+                } else {
+                    warn!("dropping tablet tool wheel without proximity_in");
+                }
+            }
+            Self::Button {
+                serial,
+                button,
+                state: button_state,
+            } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .button(serial, button, convert_wenum(button_state));
+                } else {
+                    warn!("dropping tablet tool button without proximity_in");
+                }
+            }
+            Self::Frame { time } => {
+                if in_proximity(target, state) {
+                    state
+                        .world
+                        .get::<&TabletToolServer>(target)
+                        .unwrap()
+                        .frame(time);
+                } else {
+                    warn!("dropping tablet tool frame without proximity_in");
+                }
             }
             _ => {
                 let tool = state.world.get::<&TabletToolServer>(target).unwrap();
@@ -1654,17 +1794,6 @@ impl Event for zwp_tablet_tool_v2::Event {
                         Capability { |capability| convert_wenum(capability) },
                         Done,
                         Removed,
-                        ProximityOut,
-                        Down { serial },
-                        Up,
-                        Distance { distance },
-                        Pressure { pressure },
-                        Tilt { tilt_x, tilt_y },
-                        Rotation { degrees },
-                        Slider { position },
-                        Wheel { degrees, clicks },
-                        Button { serial, button, |state| convert_wenum(state) },
-                        Frame { time },
                     ]
                 }
             }
